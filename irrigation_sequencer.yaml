@@ -1,0 +1,148 @@
+# Irrigation Sequencer
+#
+# Runs your irrigation zones IN ORDER, twice daily, at 5am and 3pm. For each
+# zone, right before it would start:
+#   - checks rain delay / forecast — if rain is expected, skips this zone
+#   - checks soil moisture — if it's already above the min threshold, skips
+#   - otherwise opens the valve and waits until either the zone's
+#     moisture-guard blueprint closes it (moisture reached max, rain/forecast
+#     kicked in) or the zone's max duration is hit (safety cap, force-closed
+#     here)
+# Either way — watered, or skipped for rain, or skipped for moisture — a
+# `gap_between_zones_minutes` pause always follows before the next zone, so
+# the well pump hub never sees continuous flow and only one zone is ever
+# active at a time.
+#
+# Requires: the "Irrigation Zone Controller" blueprint automation already
+# running for each zone (handles moisture-max stop, rain/forecast stop, and
+# manual override). This sequencer only decides WHEN to start each zone;
+# the per-zone blueprint automation still governs when to stop.
+#
+# --- CUSTOMIZE BELOW ---
+# 1. Adjust the two daily start times if needed.
+# 2. Fill in the `zones` list, one entry per zone, IN THE ORDER you want
+#    them to run. Copy/paste the zone block for each additional zone.
+# 3. Set `rain_delay` and `forecast_sensors`/`forecast_threshold` to match
+#    what you used in your per-zone blueprint instances (same entities).
+
+alias: Irrigation Sequencer
+description: Runs all irrigation zones in order twice daily, skipping instantly if a zone doesn't need water, with a gap between zones to protect the well pump hub.
+mode: single
+
+triggers:
+  - alias: Morning watering start time
+    trigger: time
+    at: "05:00:00"
+  - alias: Afternoon watering start time
+    trigger: time
+    at: "15:00:00"
+
+variables:
+  rain_delay: input_boolean.all_zone_rain_delay # <-- shared rain delay switch
+  forecast_sensors: [] # <-- e.g. [sensor.pirate_weather_precip_probability]
+  forecast_threshold: 50 # <-- match the threshold used in your per-zone blueprint
+  gap_between_zones_minutes: 1 # <-- pause between zones so the well pump hub doesn't see continuous flow
+
+  zones:
+    - name: "Backyard"
+      icon: "🌱"
+      soil_sensor: sensor.backyard_soil_moisture_humidity
+      threshold_min: input_number.backyard_moisture_threshold_min
+      threshold_max: input_number.backyard_moisture_threshold_max
+      water_valve: valve.backyard_sprinklers
+      max_duration_minutes: 20
+      notify_device: notify.mobile_app_mc
+    - name: "Front Yard"
+      icon: "🌿"
+      soil_sensor: sensor.front_yard_soil_moisture_humidity
+      threshold_min: input_number.front_yard_moisture_threshold_min
+      threshold_max: input_number.front_yard_moisture_threshold_max
+      water_valve: valve.front_yard_sprinklers
+      max_duration_minutes: 20
+      notify_device: notify.mobile_app_mc
+    # - name: "Zone 3"
+    #   icon: "🌳"
+    #   soil_sensor: sensor.zone3_soil_moisture
+    #   threshold_min: input_number.zone3_threshold_min
+    #   threshold_max: input_number.zone3_threshold_max
+    #   water_valve: valve.zone3_sprinklers
+    #   max_duration_minutes: 20
+    #   notify_device: notify.mobile_app_mc
+
+actions:
+  - repeat:
+      for_each: "{{ zones }}"
+      sequence:
+        - variables:
+            zone_name: "{{ repeat.item.name }}"
+            zone_icon: "{{ repeat.item.icon }}"
+            soil_sensor: "{{ repeat.item.soil_sensor }}"
+            threshold_min: "{{ repeat.item.threshold_min }}"
+            threshold_max: "{{ repeat.item.threshold_max }}"
+            water_valve: "{{ repeat.item.water_valve }}"
+            max_duration_minutes: "{{ repeat.item.max_duration_minutes }}"
+            notify_device: "{{ repeat.item.notify_device }}"
+            moisture_current: "{{ states(repeat.item.soil_sensor) | float(0) }}"
+            moisture_current_int: "{{ states(repeat.item.soil_sensor) | float(0) | round(0) | int }}"
+            moisture_min: "{{ states(repeat.item.threshold_min) | float(0) }}"
+            moisture_min_int: "{{ states(repeat.item.threshold_min) | float(0) | round(0) | int }}"
+            rain_expected: >-
+              {{ is_state(rain_delay, 'on') or (forecast_sensors | map('states')
+              | map('float', -1) | select('ge', forecast_threshold) | list | count > 0) }}
+            needs_water: "{{ moisture_current <= moisture_min }}"
+
+        - if:
+            - condition: template
+              value_template: "{{ rain_expected }}"
+          then:
+            - action: "{{ notify_device }}"
+              data:
+                title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
+                message: >-
+                  🌧️ Skipped — rain delay or forecast indicates rain. Moving
+                  to next zone.
+          else:
+            - if:
+                - condition: template
+                  value_template: "{{ not needs_water }}"
+              then:
+                - action: "{{ notify_device }}"
+                  data:
+                    title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
+                    message: >-
+                      ✅ Skipped — soil moisture is {{ moisture_current_int }}%,
+                      above min threshold of {{ moisture_min_int }}%. Moving
+                      to next zone.
+              else:
+                - action: "{{ notify_device }}"
+                  data:
+                    title: "{{ zone_icon }} {{ zone_name }} Watering Started"
+                    message: >-
+                      🚿 Starting — soil moisture is {{ moisture_current_int }}%,
+                      at/below min threshold of {{ moisture_min_int }}%.
+                - action: valve.open_valve
+                  target:
+                    entity_id: "{{ water_valve }}"
+                - wait_for_trigger:
+                    - trigger: state
+                      entity_id: "{{ water_valve }}"
+                      to: "closed"
+                  timeout:
+                    minutes: "{{ max_duration_minutes }}"
+                  continue_on_timeout: true
+                - if:
+                    - condition: template
+                      value_template: "{{ is_state(water_valve, 'open') }}"
+                  then:
+                    - action: valve.close_valve
+                      target:
+                        entity_id: "{{ water_valve }}"
+                    - action: "{{ notify_device }}"
+                      data:
+                        title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
+                        message: >-
+                          ⏱️ Max duration of {{ max_duration_minutes }} minutes
+                          reached. Moving to next zone.
+
+        - delay:
+            minutes: "{{ gap_between_zones_minutes }}"
