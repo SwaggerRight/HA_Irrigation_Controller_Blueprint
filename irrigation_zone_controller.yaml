@@ -2,9 +2,10 @@ blueprint:
   name: Irrigation Zone Controller
   description: >-
     Manages watering for a single zone based on calendar schedules, manual
-    overrides, soil moisture levels, and a shared rain delay switch.
-    Create one automation instance per zone (Backyard, Front Yard, etc.) and
-    fill in the inputs below — no YAML editing needed per zone.
+    overrides, soil moisture levels, a shared rain delay switch, and optional
+    rain forecast sensors. Create one automation instance per zone (Backyard,
+    Front Yard, etc.) and fill in the inputs below — no YAML editing needed
+    per zone.
   domain: automation
   input:
     zone_name:
@@ -53,6 +54,31 @@ blueprint:
       selector:
         entity:
           domain: input_boolean
+    forecast_sensors:
+      name: Rain Forecast Sensors (optional)
+      description: >-
+        One or more numeric sensors representing forecasted rain (e.g. chance
+        of precipitation %, expected precip amount). If any sensor's value is
+        at or above the threshold below, watering is skipped or stopped just
+        like the Rain Delay switch. Leave empty to disable forecast checking
+        for this zone.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          domain: sensor
+    forecast_threshold:
+      name: Rain Forecast Threshold
+      description: >-
+        If a forecast sensor's value is at or above this number, watering is
+        treated as rained-out. Match this to whatever unit your sensor uses
+        (e.g. 50 for "50% chance of rain").
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 1000
+          mode: box
     notify_device:
       name: Notify Service
       description: e.g. notify.mobile_app_mc
@@ -87,6 +113,11 @@ triggers:
     from: "off"
     to: "on"
     id: rain_delay
+
+  - alias: Rain forecast changed
+    trigger: state
+    entity_id: !input forecast_sensors
+    id: forecast_changed
 
   - alias: Calendar watering start
     trigger: calendar
@@ -141,6 +172,8 @@ actions:
       zone_calendar: !input zone_calendar
       manual_timer: !input manual_timer
       rain_delay: !input rain_delay
+      forecast_sensors: !input forecast_sensors
+      forecast_threshold: !input forecast_threshold
       notify_device: !input notify_device
 
       moisture_current: "{{ states(soil_sensor) | float(0) }}"
@@ -152,9 +185,14 @@ actions:
 
       valve_is_open: "{{ is_state(water_valve, 'open') }}"
       valve_is_closed: "{{ is_state(water_valve, 'closed') }}"
-      rain_delay_is_off: "{{ is_state(rain_delay, 'off') }}"
       calendar_is_on: "{{ is_state(zone_calendar, 'on') }}"
       manual_override_active: "{{ is_state(manual_timer, 'active') }}"
+
+      forecast_rain_expected: >-
+        {{ forecast_sensors | map('states') | map('float', -1)
+        | select('ge', forecast_threshold) | list | count > 0 }}
+      rain_expected: "{{ is_state(rain_delay, 'on') or forecast_rain_expected }}"
+      watering_allowed: "{{ not rain_expected }}"
 
   - choose:
       - alias: Stop watering because manual timer was canceled
@@ -176,14 +214,18 @@ actions:
                 the timer has been reset. Current soil moisture is
                 {{ moisture_current_int }}%.
 
-      - alias: Stop watering because rain delay is enabled
+      - alias: Stop watering because rain is expected (delay switch or forecast)
         conditions:
           - condition: trigger
-            id: rain_delay
+            id:
+              - rain_delay
+              - forecast_changed
           - condition: template
             value_template: "{{ valve_is_open }}"
           - condition: template
             value_template: "{{ not manual_override_active }}"
+          - condition: template
+            value_template: "{{ rain_expected }}"
         sequence:
           - action: valve.close_valve
             target:
@@ -195,8 +237,8 @@ actions:
             data:
               title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
               message: >-
-                🌧️ Irrigation stopped due to Rain Delay. Current soil
-                moisture is {{ moisture_current_int }}%.
+                {% if is_state(rain_delay, 'on') %}🌧️ Irrigation stopped due to Rain Delay.{% else %}🌧️ Irrigation stopped because the forecast now indicates rain is likely.{% endif %}
+                Current soil moisture is {{ moisture_current_int }}%.
 
       - alias: Stop watering because schedule, timer, or pause ended
         conditions:
@@ -247,7 +289,7 @@ actions:
             id:
               - start
           - condition: template
-            value_template: "{{ rain_delay_is_off }}"
+            value_template: "{{ watering_allowed }}"
           - condition: template
             value_template: "{{ moisture_current >= moisture_max }}"
         sequence:
@@ -265,7 +307,7 @@ actions:
             id:
               - start
           - condition: template
-            value_template: "{{ rain_delay_is_off }}"
+            value_template: "{{ watering_allowed }}"
           - condition: template
             value_template: "{{ moisture_current > moisture_min }}"
         sequence:
@@ -283,7 +325,7 @@ actions:
             id:
               - start
           - condition: template
-            value_template: "{{ rain_delay_is_off }}"
+            value_template: "{{ watering_allowed }}"
           - condition: template
             value_template: "{{ moisture_current <= moisture_min }}"
         sequence:
@@ -322,7 +364,7 @@ actions:
               - moisture_changed
               - threshold_changed
           - condition: template
-            value_template: "{{ rain_delay_is_off }}"
+            value_template: "{{ watering_allowed }}"
           - condition: template
             value_template: "{{ calendar_is_on }}"
           - condition: template
