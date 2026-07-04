@@ -1,0 +1,342 @@
+blueprint:
+  name: Irrigation Zone Controller
+  description: >-
+    Manages watering for a single zone based on calendar schedules, manual
+    overrides, soil moisture levels, and a shared rain delay switch.
+    Create one automation instance per zone (Backyard, Front Yard, etc.) and
+    fill in the inputs below — no YAML editing needed per zone.
+  domain: automation
+  input:
+    zone_name:
+      name: Zone Name
+      description: Friendly name shown in notifications (e.g. "Backyard")
+      default: Zone
+    zone_icon:
+      name: Zone Icon
+      description: Emoji shown in notification titles
+      default: 🌱
+    soil_sensor:
+      name: Soil Moisture Sensor
+      selector:
+        entity:
+          domain: sensor
+    threshold_min:
+      name: Min Moisture Threshold
+      description: Watering starts at/below this value
+      selector:
+        entity:
+          domain: input_number
+    threshold_max:
+      name: Max Moisture Threshold
+      description: Watering stops at/above this value
+      selector:
+        entity:
+          domain: input_number
+    water_valve:
+      name: Water Valve
+      selector:
+        entity:
+          domain: valve
+    zone_calendar:
+      name: Zone Calendar
+      selector:
+        entity:
+          domain: calendar
+    manual_timer:
+      name: Manual Override Timer
+      selector:
+        entity:
+          domain: timer
+    rain_delay:
+      name: Rain Delay Switch
+      description: Usually a shared input_boolean across all zones
+      selector:
+        entity:
+          domain: input_boolean
+    notify_device:
+      name: Notify Service
+      description: e.g. notify.mobile_app_mc
+      default: notify.mobile_app_mc
+      selector:
+        text:
+
+mode: single
+
+triggers:
+  - alias: Moisture changed
+    trigger: state
+    entity_id: !input soil_sensor
+    id: moisture_changed
+    not_to:
+      - unknown
+      - unavailable
+
+  - alias: Min threshold changed
+    trigger: state
+    entity_id: !input threshold_min
+    id: threshold_changed
+
+  - alias: Max threshold changed
+    trigger: state
+    entity_id: !input threshold_max
+    id: threshold_changed
+
+  - alias: Rain delay enabled
+    trigger: state
+    entity_id: !input rain_delay
+    from: "off"
+    to: "on"
+    id: rain_delay
+
+  - alias: Calendar watering start
+    trigger: calendar
+    entity_id: !input zone_calendar
+    event: start
+    offset: "0:0:0"
+    id: start
+
+  - alias: Calendar watering stop
+    trigger: calendar
+    entity_id: !input zone_calendar
+    event: end
+    offset: "0:0:0"
+    id: stop
+
+  - alias: Manual Override On
+    trigger: state
+    entity_id: !input manual_timer
+    to: active
+    id: manual_override_on
+
+  - alias: Manual Override Pause
+    trigger: state
+    entity_id: !input manual_timer
+    to: paused
+    id: manual_override_pause
+
+  - alias: Manual Timer Finished
+    trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input manual_timer
+    id: manual_timer_finished
+
+  - alias: Manual Timer Canceled
+    trigger: event
+    event_type: timer.cancelled
+    event_data:
+      entity_id: !input manual_timer
+    id: manual_timer_canceled
+
+conditions: []
+
+actions:
+  - variables:
+      zone_name: !input zone_name
+      zone_icon: !input zone_icon
+      soil_sensor: !input soil_sensor
+      threshold_min: !input threshold_min
+      threshold_max: !input threshold_max
+      water_valve: !input water_valve
+      zone_calendar: !input zone_calendar
+      manual_timer: !input manual_timer
+      rain_delay: !input rain_delay
+      notify_device: !input notify_device
+
+      moisture_current: "{{ states(soil_sensor) | float(0) }}"
+      moisture_current_int: "{{ states(soil_sensor) | float(0) | round(0) | int }}"
+      moisture_min: "{{ states(threshold_min) | float(0) }}"
+      moisture_min_int: "{{ states(threshold_min) | float(0) | round(0) | int }}"
+      moisture_max: "{{ states(threshold_max) | float(0) }}"
+      moisture_max_int: "{{ states(threshold_max) | float(0) | round(0) | int }}"
+
+      valve_is_open: "{{ is_state(water_valve, 'open') }}"
+      valve_is_closed: "{{ is_state(water_valve, 'closed') }}"
+      rain_delay_is_off: "{{ is_state(rain_delay, 'off') }}"
+      calendar_is_on: "{{ is_state(zone_calendar, 'on') }}"
+      manual_override_active: "{{ is_state(manual_timer, 'active') }}"
+
+  - choose:
+      - alias: Stop watering because manual timer was canceled
+        conditions:
+          - condition: trigger
+            id: manual_timer_canceled
+        sequence:
+          - action: valve.close_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: timer.cancel
+            target:
+              entity_id: "{{ manual_timer }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Canceled"
+              message: >-
+                ⛔ Irrigation canceled manually. Water has been shut off and
+                the timer has been reset. Current soil moisture is
+                {{ moisture_current_int }}%.
+
+      - alias: Stop watering because rain delay is enabled
+        conditions:
+          - condition: trigger
+            id: rain_delay
+          - condition: template
+            value_template: "{{ valve_is_open }}"
+          - condition: template
+            value_template: "{{ not manual_override_active }}"
+        sequence:
+          - action: valve.close_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: timer.cancel
+            target:
+              entity_id: "{{ manual_timer }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
+              message: >-
+                🌧️ Irrigation stopped due to Rain Delay. Current soil
+                moisture is {{ moisture_current_int }}%.
+
+      - alias: Stop watering because schedule, timer, or pause ended
+        conditions:
+          - condition: trigger
+            id:
+              - stop
+              - manual_timer_finished
+              - manual_override_pause
+          - condition: template
+            value_template: "{{ valve_is_open }}"
+        sequence:
+          - action: valve.close_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Complete"
+              message: >-
+                ✅ Irrigation complete. Current soil moisture is
+                {{ moisture_current_int }}%.
+
+      - alias: Stop watering because soil moisture reached max threshold
+        conditions:
+          - condition: template
+            value_template: "{{ valve_is_open }}"
+          - condition: template
+            value_template: "{{ moisture_current >= moisture_max }}"
+          - condition: template
+            value_template: "{{ not manual_override_active }}"
+        sequence:
+          - action: valve.close_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: timer.cancel
+            target:
+              entity_id: "{{ manual_timer }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
+              message: >-
+                💧 Irrigation stopped because soil moisture is
+                {{ moisture_current_int }}%. Max threshold is
+                {{ moisture_max_int }}%.
+
+      - alias: Skip watering because soil moisture is at or above max threshold
+        conditions:
+          - condition: trigger
+            id:
+              - start
+          - condition: template
+            value_template: "{{ rain_delay_is_off }}"
+          - condition: template
+            value_template: "{{ moisture_current >= moisture_max }}"
+        sequence:
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
+              message: >-
+                💧 Irrigation skipped because soil moisture is
+                {{ moisture_current_int }}%. Max threshold is
+                {{ moisture_max_int }}%.
+
+      - alias: Skip watering because soil moisture is above min threshold
+        conditions:
+          - condition: trigger
+            id:
+              - start
+          - condition: template
+            value_template: "{{ rain_delay_is_off }}"
+          - condition: template
+            value_template: "{{ moisture_current > moisture_min }}"
+        sequence:
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
+              message: >-
+                ✅ Irrigation skipped because soil moisture is
+                {{ moisture_current_int }}%. Min threshold is
+                {{ moisture_min_int }}%.
+
+      - alias: Start watering from calendar
+        conditions:
+          - condition: trigger
+            id:
+              - start
+          - condition: template
+            value_template: "{{ rain_delay_is_off }}"
+          - condition: template
+            value_template: "{{ moisture_current <= moisture_min }}"
+        sequence:
+          - action: valve.open_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Started"
+              message: >-
+                🚿 Irrigation started because soil moisture is
+                {{ moisture_current_int }}%. Min threshold is
+                {{ moisture_min_int }}%.
+
+      - alias: Start manual override watering (ignores moisture threshold and rain delay)
+        conditions:
+          - condition: trigger
+            id:
+              - manual_override_on
+        sequence:
+          - action: valve.open_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Manual Watering Started"
+              message: >-
+                🚿 Manual override started — ignoring moisture threshold and
+                rain delay. Current soil moisture is {{ moisture_current_int }}%.
+                Watering will run until the timer ends.
+
+      - alias: Start watering when moisture drops to or below min during schedule
+        conditions:
+          - condition: trigger
+            id:
+              - moisture_changed
+              - threshold_changed
+          - condition: template
+            value_template: "{{ rain_delay_is_off }}"
+          - condition: template
+            value_template: "{{ calendar_is_on }}"
+          - condition: template
+            value_template: "{{ valve_is_closed }}"
+          - condition: template
+            value_template: "{{ moisture_current <= moisture_min }}"
+        sequence:
+          - action: valve.open_valve
+            target:
+              entity_id: "{{ water_valve }}"
+          - action: "{{ notify_device }}"
+            data:
+              title: "{{ zone_icon }} {{ zone_name }} Watering Started"
+              message: >-
+                🚿 Irrigation started because soil moisture dropped to
+                {{ moisture_current_int }}%. Min threshold is
+                {{ moisture_min_int }}%.
