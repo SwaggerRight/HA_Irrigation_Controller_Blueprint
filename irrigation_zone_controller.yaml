@@ -23,12 +23,6 @@ blueprint:
       selector:
         entity:
           domain: sensor
-    threshold_min:
-      name: Min Moisture Threshold
-      description: Watering starts at/below this value
-      selector:
-        entity:
-          domain: input_number
     threshold_max:
       name: Max Moisture Threshold
       description: Watering stops at/above this value
@@ -86,18 +80,11 @@ blueprint:
 mode: single
 
 triggers:
-  - alias: Moisture changed
-    trigger: state
+  - alias: Moisture crossed above max threshold
+    trigger: numeric_state
     entity_id: !input soil_sensor
-    id: moisture_changed
-    not_to:
-      - unknown
-      - unavailable
-
-  - alias: Min threshold changed
-    trigger: state
-    entity_id: !input threshold_min
-    id: threshold_changed
+    above: !input threshold_max
+    id: moisture_max_reached
 
   - alias: Max threshold changed
     trigger: state
@@ -149,7 +136,6 @@ actions:
       zone_name: !input zone_name
       zone_icon: !input zone_icon
       soil_sensor: !input soil_sensor
-      threshold_min: !input threshold_min
       threshold_max: !input threshold_max
       water_valve: !input water_valve
       manual_timer: !input manual_timer
@@ -160,8 +146,6 @@ actions:
 
       moisture_current: "{{ states(soil_sensor) | float(0) }}"
       moisture_current_int: "{{ states(soil_sensor) | float(0) | round(0) | int }}"
-      moisture_min: "{{ states(threshold_min) | float(0) }}"
-      moisture_min_int: "{{ states(threshold_min) | float(0) | round(0) | int }}"
       moisture_max: "{{ states(threshold_max) | float(0) }}"
       moisture_max_int: "{{ states(threshold_max) | float(0) | round(0) | int }}"
 
