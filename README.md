@@ -31,15 +31,30 @@ This split exists because a single shared calendar-per-zone approach means a ski
 - (Optional) One or more numeric sensors for rain forecast (chance of rain %, expected precip amount, etc.) — must report a plain number, not a condition string. Weather integrations that only expose a `weather.xxx` entity typically need a small template sensor to extract a numeric value before they'll work here.
 - A notify service (e.g. a mobile app notify target)
 
+## Zones Without a Soil Sensor
+
+Don't have a moisture sensor for a zone yet? The blueprint's `soil_sensor` input requires a `sensor.xxx` entity, but you can satisfy that with a permanent placeholder instead of a real sensor:
+
+1. **Settings → Devices & Services → Helpers → + Create Helper → Template → Template a sensor**
+2. Name it something like "No Sensor Placeholder," and set the state template to `{{ 0 }}`
+3. Use the resulting `sensor.no_sensor_placeholder` entity as that zone's `soil_sensor` input
+
+Since the value never changes, the blueprint's moisture-max `numeric_state` trigger — which only fires on an actual crossing event — simply never fires for that zone. Moisture-based stopping becomes fully inert.
+
+**Important tradeoff:** with this in place, that zone's *only* protection against running indefinitely is the sequencer's own `max_duration_minutes` timeout (see `irrigation_sequencer.yaml`) — it behaves as a plain timer-only zone, same as an old-school sprinkler controller with no moisture awareness at all.
+
 ## Installation
 
-1. Copy `irrigation_zone_controller.yaml` into `config/blueprints/automation/<your_folder>/` in your Home Assistant config, or import it via **Settings → Automations & Scenes → Blueprints → Import Blueprint** using the URL to the raw file itself (e.g. `https://raw.githubusercontent.com/<user>/<repo>/main/irrigation_zone_controller.yaml`, or the GitHub blob URL) — not just the repo's main page.
-2. Go to **Settings → Developer Tools → YAML** and click **Reload Automations** to pick up blueprint changes (there's no separate "Reload Blueprints" button in current Home Assistant — reloading automations covers blueprint-based ones too).
-3. Create a new automation from the blueprint for each zone and fill in the inputs. When updating an existing zone's inputs after a blueprint change, open that automation once and re-save it so any removed/renamed fields clear out.
-4. Edit `irrigation_sequencer.yaml` directly with your actual entity IDs, start times, and zone order (this one isn't a blueprint — it's specific to your setup), then paste it into a new automation's YAML editor (or add the file to your automations and reload).
+1. Copy `irrigation_zone_controller.yaml` into `config/blueprints/automation/<your_folder>/` in your Home Assistant config, or import it via **Settings → Automations & Scenes → Blueprints → Import Blueprint** using the URL `[https://raw.githubusercontent.com/SwaggerRight/HA_Irrigation_Controller_Blueprint/refs/heads/main/irrigation_zone_controller.yaml]`.
+2. Create one shared helper for Rain Delay (Helper Type: Input Boolean) ## Only need one regardless of the number of zones
+3. Create the following helpers per zone:
+   - Min Moisture Threshold (Helper Type: Input Number)
+   - Max Moisture Threshold (Helper Type: Input Number)
+   - Zone Timer (Helper Type: Timer)
+4. Create a new automation from the blueprint for each zone and fill in the inputs.
+   - **Updating later:** if you reimport an updated version of the blueprint, go to **Settings → Developer Tools → YAML** and click **Reload Automations** to pick it up, then open each existing zone automation once and re-save it so any removed/renamed fields clear out.
+5. Edit `irrigation_sequencer.yaml` directly with your actual entity IDs, start times, and zone order (this one isn't a blueprint — it's specific to your setup), then paste it into a new automation's YAML editor (or add the file to your automations and reload).
 
 ## License
 
 MIT
-
-
