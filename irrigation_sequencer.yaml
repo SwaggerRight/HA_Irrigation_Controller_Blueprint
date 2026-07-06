@@ -140,23 +140,40 @@ actions:
                       timeout:
                         seconds: 60
                       continue_on_timeout: true
-                    - wait_template: "{{ not is_state(water_valve, 'open') }}"
+                    - wait_template: "{{ is_state(water_valve, 'closed') }}"
                       timeout:
                         minutes: "{{ max_duration_minutes }}"
                       continue_on_timeout: true
+                    - variables:
+                        needed_force_close: "{{ not is_state(water_valve, 'closed') }}"
                     - if:
                         - condition: template
-                          value_template: "{{ is_state(water_valve, 'open') }}"
+                          value_template: "{{ needed_force_close }}"
                       then:
                         - action: valve.close_valve
                           target:
                             entity_id: "{{ water_valve }}"
+                    - wait_template: "{{ is_state(water_valve, 'closed') }}"
+                      timeout:
+                        seconds: 60
+                      continue_on_timeout: true
+                    - if:
+                        - condition: template
+                          value_template: "{{ is_state(water_valve, 'closed') }}"
+                      then:
                         - action: "{{ notify_device }}"
                           data:
                             title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
                             message: >-
-                              ⏱️ Max duration of {{ max_duration_minutes }} minutes
-                              reached. Moving to next zone.
+                              {% if needed_force_close %}⏱️ Max duration of {{ max_duration_minutes }} minutes reached, valve force-closed and confirmed.{% else %}✅ Stopped by moisture/rain guard, valve confirmed closed.{% endif %}
+                              Moving to next zone.
+                      else:
+                        - action: "{{ notify_device }}"
+                          data:
+                            title: "⚠️ {{ zone_icon }} {{ zone_name }} VALVE NOT CONFIRMED CLOSED"
+                            message: >-
+                              {% if needed_force_close %}Max duration reached and a close command was sent, but the valve has not confirmed closed after 60 seconds.{% else %}The valve appeared to close but could not be re-confirmed.{% endif %}
+                              Check this valve manually.
 
         - delay:
             minutes: "{{ gap_between_zones_minutes }}"
