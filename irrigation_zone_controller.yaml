@@ -1,4 +1,5 @@
-
+blueprint:
+  name: Irrigation Zone Controller
   description: >-
     Reactive watering guard for a single zone: enforces soil moisture limits,
     rain delay, and rain forecast sensors, and supports a manual override for
@@ -83,6 +84,8 @@ triggers:
     trigger: numeric_state
     entity_id: !input soil_sensor
     above: !input threshold_max
+    for:
+      seconds: 30
     id: moisture_max_reached
 
   - alias: Max threshold changed
@@ -262,3 +265,4 @@ actions:
                 🚿 Manual override started — ignoring moisture threshold and
                 rain delay. Current soil moisture is {{ moisture_current_int }}%.
                 Watering will run until the timer ends.
+
