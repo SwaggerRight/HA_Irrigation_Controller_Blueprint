@@ -40,7 +40,7 @@ triggers:
 variables:
   rain_delay: input_boolean.all_zone_rain_delay # <-- shared rain delay switch
   forecast_sensors: [] # <-- e.g. [sensor.pirate_weather_precip_probability]
-  forecast_threshold: 50 # <-- match the threshold used in your per-zone blueprint
+  forecast_threshold: 60 # <-- match the threshold used in your per-zone blueprint
   gap_between_zones_minutes: 1 # <-- pause between zones so the well pump hub doesn't see continuous flow
 
   zones:
@@ -86,6 +86,7 @@ actions:
             moisture_current_int: "{{ states(repeat.item.soil_sensor) | float(0) | round(0) | int }}"
             moisture_min: "{{ states(repeat.item.threshold_min) | float(0) }}"
             moisture_min_int: "{{ states(repeat.item.threshold_min) | float(0) | round(0) | int }}"
+            sensor_available: "{{ states(repeat.item.soil_sensor) not in ['unknown', 'unavailable', 'none', ''] }}"
             rain_expected: >-
               {{ is_state(rain_delay, 'on') or (forecast_sensors | map('states')
               | map('float', -1) | select('ge', forecast_threshold) | list | count > 0) }}
@@ -93,53 +94,69 @@ actions:
 
         - if:
             - condition: template
-              value_template: "{{ rain_expected }}"
+              value_template: "{{ not sensor_available }}"
           then:
             - action: "{{ notify_device }}"
               data:
                 title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
                 message: >-
-                  🌧️ Skipped — rain delay or forecast indicates rain. Moving
-                  to next zone.
+                  ⚠️ Skipped — soil moisture sensor is unavailable, so
+                  moisture can't be confirmed. Moving to next zone without
+                  watering. Check this sensor.
           else:
             - if:
                 - condition: template
-                  value_template: "{{ not needs_water }}"
+                  value_template: "{{ rain_expected }}"
               then:
                 - action: "{{ notify_device }}"
                   data:
                     title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
                     message: >-
-                      ✅ Skipped — soil moisture is {{ moisture_current_int }}%,
-                      above min threshold of {{ moisture_min_int }}%. Moving
-                      to next zone.
+                      🌧️ Skipped — rain delay or forecast indicates rain.
+                      Moving to next zone.
               else:
-                - action: "{{ notify_device }}"
-                  data:
-                    title: "{{ zone_icon }} {{ zone_name }} Watering Started"
-                    message: >-
-                      🚿 Starting — soil moisture is {{ moisture_current_int }}%,
-                      at/below min threshold of {{ moisture_min_int }}%.
-                - action: valve.open_valve
-                  target:
-                    entity_id: "{{ water_valve }}"
-                - wait_template: "{{ is_state(water_valve, 'closed') }}"
-                  timeout:
-                    minutes: "{{ max_duration_minutes }}"
-                  continue_on_timeout: true
                 - if:
                     - condition: template
-                      value_template: "{{ is_state(water_valve, 'open') }}"
+                      value_template: "{{ not needs_water }}"
                   then:
-                    - action: valve.close_valve
-                      target:
-                        entity_id: "{{ water_valve }}"
                     - action: "{{ notify_device }}"
                       data:
-                        title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
+                        title: "{{ zone_icon }} {{ zone_name }} Watering Skipped"
                         message: >-
-                          ⏱️ Max duration of {{ max_duration_minutes }} minutes
-                          reached. Moving to next zone.
+                          ✅ Skipped — soil moisture is {{ moisture_current_int }}%,
+                          above min threshold of {{ moisture_min_int }}%. Moving
+                          to next zone.
+                  else:
+                    - action: "{{ notify_device }}"
+                      data:
+                        title: "{{ zone_icon }} {{ zone_name }} Watering Started"
+                        message: >-
+                          🚿 Starting — soil moisture is {{ moisture_current_int }}%,
+                          at/below min threshold of {{ moisture_min_int }}%.
+                    - action: valve.open_valve
+                      target:
+                        entity_id: "{{ water_valve }}"
+                    - wait_template: "{{ is_state(water_valve, 'open') }}"
+                      timeout:
+                        seconds: 60
+                      continue_on_timeout: true
+                    - wait_template: "{{ not is_state(water_valve, 'open') }}"
+                      timeout:
+                        minutes: "{{ max_duration_minutes }}"
+                      continue_on_timeout: true
+                    - if:
+                        - condition: template
+                          value_template: "{{ is_state(water_valve, 'open') }}"
+                      then:
+                        - action: valve.close_valve
+                          target:
+                            entity_id: "{{ water_valve }}"
+                        - action: "{{ notify_device }}"
+                          data:
+                            title: "{{ zone_icon }} {{ zone_name }} Watering Stopped"
+                            message: >-
+                              ⏱️ Max duration of {{ max_duration_minutes }} minutes
+                              reached. Moving to next zone.
 
         - delay:
             minutes: "{{ gap_between_zones_minutes }}"
